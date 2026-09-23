@@ -32,6 +32,6 @@ class DescuentoFronteraTest {
     @Test
     void diezPorCientoDespuesDeLaFrontera() {
         int obtenido = descuento.porcentaje(100);
-        assertEquals(101, obtenido);
+        assertEquals(10, obtenido);
     }
 }

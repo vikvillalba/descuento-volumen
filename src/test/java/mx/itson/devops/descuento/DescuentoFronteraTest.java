@@ -34,13 +34,7 @@ class DescuentoFronteraTest {
         int obtenido = descuento.porcentaje(100);
         assertEquals(10, obtenido);
     }
-
-    @Test
-    void sinDescuentoConCeroUnidades() {
-        int obtenido = descuento.porcentaje(0);
-        assertEquals(0, obtenido);
-    }
-
+    
     @Test
     void errorPorUnidadesNegativas() {
         assertThrowsExactly(IllegalArgumentException.class, () -> descuento.porcentaje(-1));

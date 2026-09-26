@@ -13,7 +13,7 @@ package mx.itson.devops.descuento;
 public class Descuento {
 
     public int porcentaje(int unidades) {
-        if (unidades <= 0) {
+        if (unidades < 0) {
             throw new IllegalArgumentException("unidades negativas: " + unidades);
         }
         if (unidades >= 500) {

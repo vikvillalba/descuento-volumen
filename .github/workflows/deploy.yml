@@ -1,0 +1,69 @@
+name: Deploy
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC para asumir el rol de AWS sin llaves
+  contents: read
+
+concurrency:
+  group: deploy-lambda
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: descuento-docker
+  FUNCTION_NAME: descuento-docker
+
+jobs:
+  deploy:
+    name: Build, push y deploy a Lambda
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el codigo del repositorio
+        uses: actions/checkout@v6
+
+      - name: Credenciales de AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login a ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Preparar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build y push de la imagen
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY:${GITHUB_SHA::7}"
+          docker buildx build --platform linux/amd64 --provenance=false \
+            --build-arg APP_VERSION=${GITHUB_SHA::7} --load -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Actualizar la funcion Lambda
+        env:
+          IMAGE: ${{ steps.image.outputs.uri }}
+        run: |
+          aws lambda update-function-code --function-name "$FUNCTION_NAME" --image-uri "$IMAGE"
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME"
+
+      - name: Smoke test
+        run: |
+          aws lambda invoke --function-name "$FUNCTION_NAME" \
+            --cli-binary-format raw-in-base64-out \
+            --payload '{"unidades":150,"precioCentavos":2500}' \
+            --query FunctionError --output text r.json | tee err.txt
+          cat r.json; echo
+          grep -qx None err.txt                     # la funcion no lanzo excepcion
+          jq -e '.porcentaje == 10 and .totalCentavos == 337500' r.json

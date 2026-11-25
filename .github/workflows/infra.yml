@@ -1,0 +1,116 @@
+name: Infra
+
+# Aplica la infraestructura de infra/ con Terraform.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'infra/**'
+      - 'src/main/**'
+      - 'pom.xml'
+      - '.github/workflows/infra.yml'
+  workflow_dispatch:
+    inputs:
+      workspace:
+        description: 'Workspace de Terraform (default, qa, ...)'
+        default: 'default'
+        required: true
+      accion:
+        description: 'plan solo muestra cambios; apply los aplica'
+        type: choice
+        options: [ plan, apply ]
+        default: plan
+
+permissions:
+  id-token: write   # OIDC para asumir el rol de AWS sin llaves
+  contents: read
+
+concurrency:
+  group: terraform-${{ inputs.workspace || 'default' }}
+  cancel-in-progress: false   # nunca cortar un apply a medias
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+  TF_WORKSPACE_NAME: ${{ inputs.workspace || 'default' }}
+  TF_ACCION: ${{ inputs.accion || 'apply' }}
+  TF_IN_AUTOMATION: 'true'
+
+jobs:
+  terraform:
+    name: Terraform ${{ inputs.accion || 'apply' }} (${{ inputs.workspace || 'default' }})
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+
+    steps:
+      - name: Descargar el codigo del repositorio
+        uses: actions/checkout@v6
+
+      - name: Preparar Java 21 (Temurin) y cache de Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Construir el JAR (con pruebas)
+        working-directory: .
+        run: |
+          mvn -B package
+          JAR=$(ls "$PWD"/target/descuento-volumen-*.jar | grep -v -e sources -e javadoc | head -1)
+          echo "JAR=$JAR" >> "$GITHUB_ENV"
+          echo "JAR: $JAR"
+
+      - name: Preparar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.13.x'
+          terraform_wrapper: false
+
+      - name: Credenciales de AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform init
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          # Si existe la variable TF_STATE_BUCKET, reemplaza el bucket de main.tf
+          if [ -n "$TF_STATE_BUCKET" ]; then
+            terraform init -input=false -backend-config="bucket=$TF_STATE_BUCKET"
+          else
+            terraform init -input=false
+          fi
+
+      - name: Seleccionar workspace
+        run: terraform workspace select -or-create "$TF_WORKSPACE_NAME"
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform plan
+        run: |
+          terraform plan -input=false -var="jar=$JAR" -out=tfplan
+          terraform show -no-color tfplan > plan.txt
+          {
+            echo "### Plan ($TF_WORKSPACE_NAME)"
+            echo '```'
+            grep -E '^(Plan:|No changes)' plan.txt || tail -5 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: terraform apply
+        if: env.TF_ACCION == 'apply'
+        run: |
+          terraform apply -input=false tfplan
+          {
+            echo "### Recursos ($TF_WORKSPACE_NAME)"
+            echo "- Funcion: \`$(terraform output -raw function_name)\`"
+            echo "- ARN: \`$(terraform output -raw function_arn)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
